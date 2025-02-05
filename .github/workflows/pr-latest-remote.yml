@@ -1,0 +1,91 @@
+---
+name: "pr-latest-remote"
+
+on:
+  schedule:
+    - cron: "0 1 * * *"  # UTC 
+  workflow_dispatch:  # Allows manual execution
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout LandSandBoat Server
+        uses: actions/checkout@v4
+        with:
+          repository: LandSandBoat/server
+          # submodules: 'recursive' / Not TODAY!
+          fetch-depth: 1
+          path: 'remote_repo'
+
+      - name: Extract Git Version
+        id: git_version
+        run: |
+          pushd remote_repo
+          VERSION=$(git log -1 --pretty=format:"%h")
+          popd
+          rm -rf remote_repo
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Config git
+        id: cfg_git
+        run: |
+          # Configure
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+        
+      - name: Reset to Main Branch
+        id: main_branch
+        run: |
+          # Grabs All branches
+          git fetch --all
+          # Checks out the Base/Main Branch
+          git checkout main
+          # Create a new branch for remotes
+
+      - name: Branch Decision point
+        id: decision_branch
+        run: |
+          PR_EXISTS=$(gh pr list --repo ${{ github.repository }} --search ${{ env.VERSION }} -s all --json title --jq ".[].title" )
+          if [ -n "$PR_EXISTS" ]; then
+            echo "PR_FOUND=true" >> $GITHUB_ENV
+          else
+            echo "PR_FOUND=false" >> $GITHUB_ENV
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Asset Commit
+        if: env.PR_FOUND == 'false'
+        run: |
+          # Create a new branch for remotes
+          git checkout -b version-bump-${{ env.VERSION }}
+          # Update & Add our assets
+          if [ -f VERSION ]; then
+            sed -i -E "s/(Source: ).*/\1${{ env.VERSION }}/" VERSION
+          else
+            cat > VERSION <<EOF
+            Execs: 1.0.0
+            Containers: 1.0.0
+            Source: $VERSION
+            EOF
+          fi
+          echo "Version: ${{ env.VERSION }} Date: $(date)" >> VERSION_CHANGELOG
+          git add VERSION VERSION_CHANGELOG
+          # Commit Materials
+          git commit -m "Update to version ${{ env.VERSION }}"
+
+      - name: Create PR if version doesn't exist in PRs
+        if: env.PR_FOUND == 'false'
+        run: |
+          # Commit our Branch to our Remote
+          git push origin version-bump-${{ env.VERSION }}
+          # Open the PR 
+          gh pr create --base main --head version-bump-${{ env.VERSION }} --title "Verbsion bump to v${{ env.VERSION }}" --body "Update to version ${{ env.VERSION }}"

@@ -1,0 +1,141 @@
+---
+name: "build-executables"
+
+# Configures this workflow
+on:
+  push: 
+    branches:
+      - main
+  pull_request:
+    # types: [ opened, edited, reopened, synchronize ]
+    types: [ opened, reopened, synchronize ]
+  workflow_dispatch:  # Allows manual execution
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Available machines:
+# https://github.com/actions/runner-images/tree/main
+
+jobs:
+  Build_execs:
+    strategy:
+      matrix:
+        os: [ ubuntu-24.04, ubuntu-24.04-arm ]
+    runs-on: ${{ matrix.os }}
+    outputs:
+      artid: ${{ steps.artifact-upload-step.outputs.artifact-id }}
+      arturl: ${{ steps.artifact-upload-step.outputs.artifact-url }}
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+    - name: Checkout LandSandBoat server
+      uses: actions/checkout@v4
+      # with:
+      #   repository: LandSandBoat/server
+      #   submodules: 'recursive'
+      #   fetch-depth: 1
+
+    # Package Management Logic Here
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y git curl
+
+    # Cache build Folders
+    # - name: Cache 'build' folder
+    #   uses: actions/cache@v4
+    #   with:
+    #     path: build
+    #     key: ${{ matrix.os }}-GCC14-64bit
+
+    - name: Configure & Build Assets
+      run: |
+        echo "SHORT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+        echo "OS_ARCH_TYPE=$(uname -p)" >> $GITHUB_ENV
+        echo "OS_TYPE=$(uname)" >> $GITHUB_ENV
+        touch binary1 binary2 binary3 binary4 exec1
+
+    - name: Archive PR Executables
+      if: ${{ github.ref_name != 'main' }}
+      uses: actions/upload-artifact@v4
+      id: artifact-upload-step
+      with:
+        name: ${{ env.OS_TYPE }}_${{ env.SHORT_HASH }}_${{ env.OS_ARCH_TYPE }}
+        retention-days: 1
+        overwrite: true
+        path: |
+          binary1
+          binary2
+          binary3
+          binary4
+          exec1
+
+    - name: Append Executables information
+      if: ${{ github.ref_name != 'main' }}
+      run: |
+        gh pr comment ${{ env.PR_NUMBER }} --repo ${{ github.repository }} --body "${{ env.OS_TYPE }}_${{ env.SHORT_HASH }}_${{ env.OS_ARCH_TYPE }}: ${{ steps.artifact-upload-step.outputs.artifact-url }}"
+      env:
+        PR_NUMBER: ${{ github.event.number }}
+        GH_TOKEN: ${{ github.token }}
+    
+    - name: Archive Main Executables
+      if: ${{ github.ref_name == 'main' }}
+      uses: actions/upload-artifact@v4
+      id: artifact-upload-main
+      with:
+        name: ${{ env.OS_TYPE }}_${{ env.SHORT_HASH }}_${{ env.OS_ARCH_TYPE }}
+        retention-days: 5
+        overwrite: true
+        path: |
+          binary1
+          binary2
+          binary3
+          binary4
+          exec1
+
+    - name: Create Release
+      if: ${{ github.ref_name == 'main' }}
+      run: |
+        CURRENT_VERSION=$(grep -i exec VERSION | cut -d":" -f2 | cut -c 2-)
+        INCREMENT_BY=1
+        CURRENT_INC=$(( $( echo $CURRENT_VERSION | rev | cut -d"." -f1 ) + $INCREMENT_BY ))
+        BUMP_VERSION=$(grep -i exec VERSION | cut -d":" -f2 | cut -c 2- | rev | cut -c 2- | rev )$CURRENT_INC
+        echo "VERSION=$BUMP_VERSION" >> $GITHUB_ENV
+        gh release create v$BUMP_VERSION --generate-notes binary1 binary2 binary3 binary4 exec1
+      env:
+        PR_NUMBER: ${{ github.event.number }}
+        GH_TOKEN: ${{ github.token }}
+
+      - name: Update Version for Exec Asset Commit
+        if: ${{ github.ref_name == 'main' }}
+        run: |
+          # Create a new branch for remotes
+          git checkout -b exec-version-bump-${{ env.VERSION }}
+          # Update & Add our assets
+          if [ -f VERSION ]; then
+            sed -i -E "s/(Execs: ).*/\1${{ env.VERSION }}/" VERSION
+          else
+            cat > VERSION <<EOF
+            Execs: 1.0.1
+            Containers: 1.0.0
+            Source: ${{ env.SHORT_HASH }}
+            EOF
+          fi
+          echo "Version: ${{ env.VERSION }} Date: $(date)" >> VERSION_CHANGELOG
+          git add VERSION VERSION_CHANGELOG
+          # Commit Materials
+          git commit -m "Update to version ${{ env.VERSION }}"
+
+      - name: Create PR if version doesn't exist in PRs
+        if: ${{ github.ref_name == 'main' }}
+        run: |
+          # Commit our Branch to our Remote
+          git push origin exec-version-bump-${{ env.VERSION }}
+          # Open the PR 
+          gh pr create --base main --head exec-version-bump-${{ env.VERSION }} --title "Verbsion bump to v${{ env.VERSION }}" --body "Update to version ${{ env.VERSION }}"
